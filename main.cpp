@@ -1,8 +1,5 @@
 
 #include <Arduino.h>
-#include <SPI.h>
-#include <MFRC522.h>
-
 #include <HttpClient.h>
 #include <WiFi.h>
 #include <inttypes.h>
@@ -13,19 +10,38 @@
 #include "nvs.h"
 #include "nvs_flash.h"
 
-/* Photoresistor Variables */
-const int photoResistorPin = 32; 
-const int ledPin = 27;            
-int minLightValue = 4095; 
-int maxLightValue = 0;
-unsigned long calibrationTime = 10000; // 10 seconds
-unsigned long startTime;
 
-/* RFID Variables */
-#define RST_PIN 33   // Reset pin
-#define SS_PIN 21    // Slave Select pin (SDA)
-MFRC522 rfid(SS_PIN, RST_PIN);
+#include <Wire.h>
+#include "string.h"
+#include <Servo.h>
 
+#include <SPI.h>
+#include <MFRC522.h>
+#include "HX711.h"
+#include "soc/rtc.h"
+
+
+void serverCode();
+void nvs_access();
+void attemptFeed();
+
+
+/* Weight Sensor Variable */
+const int LOADCELL_DOUT_PIN = 22;
+const int LOADCELL_SCK_PIN = 17;
+bool calibrateTotalFeed = true;
+float desiredFoodWeight;
+
+HX711 scale;
+
+
+/* Servo Variables */
+const int SERVO_PIN = 16;
+const int SERVO_OPEN_POS = 87;
+const int SERVO_CLOSE_POS = 7;
+bool dispenseFood = false;
+
+Servo myServo;
 
 /* WIFI Connection */
 char ssid[50]; // your network SSID (name)
@@ -38,10 +54,9 @@ const int kNetworkTimeout = 30 * 1000;
 // Number of milliseconds to wait if no data is available before trying again
 const int kNetworkDelay = 1000;
 
-
-void blinkLED();
-void serverCode(String url);
-void nvs_access();
+/* Feeding variables */
+unsigned long lastFeedTime = 0;
+const unsigned long feedInterval = 1 * 20 * 1000;  // shortened for demo purposes
 
 void setup() {
   Serial.begin(9600);
@@ -65,82 +80,87 @@ void setup() {
   Serial.println("MAC address: ");
   Serial.println(WiFi.macAddress());
   // -------------------------------------------------
-  delay(2000);
 
 
+  // Weight Sensor -----------------------------------------
+  rtc_cpu_freq_config_t config;
+  rtc_clk_cpu_freq_get_config(&config);
+  rtc_clk_cpu_freq_to_config(RTC_CPU_FREQ_80M, &config);
+  rtc_clk_cpu_freq_set_config_fast(&config);
+  scale.begin(LOADCELL_DOUT_PIN, LOADCELL_SCK_PIN);
+            
+  scale.set_scale(332.3238); // obtained by calibrating the scale with known weights
+  scale.tare();               
+  // -------------------------------------------------
 
-  SPI.begin(2, 15, 22, 21); // SCK, MISO, MOSI, SDA
-
-  pinMode(photoResistorPin, INPUT);
-  pinMode(ledPin, OUTPUT);
-  digitalWrite(ledPin, HIGH);
+  // Servo -----------------------------------------
+  myServo.attach(SERVO_PIN);
+  // start with servo closed
+  myServo.write(SERVO_CLOSE_POS);
+  // -------------------------------------------------
 
   delay(1000);
-
-  
-
-  rfid.PCD_Init();     
-  Serial.println("RFID Reader initialized. Scan an RFID card or fob...\n\n");
-  delay(1000);
-
-  // Start calibration
-  startTime = millis();
-  Serial.println("Calibration Phase: Move the sensor to minimum and maximum light.");
-
 }
-
 
 void loop() {
-  unsigned long currentTime = millis();
-  int lightValue = analogRead(photoResistorPin);
-  bool inCalibration = ((currentTime - startTime) <= calibrationTime);
+  if(calibrateTotalFeed) {
+    Serial.print("\nPlace a full portion of food on the scale.\n");
+    delay(2000);
+    Serial.print("Your food weighs: ");
+    desiredFoodWeight = scale.get_units();
+    Serial.println(scale.get_units(), 1);
+    calibrateTotalFeed = false;
+    delay(4000);
+  } 
 
-  // Calibration For 10 Sec
-  if (inCalibration) {
-    blinkLED();
-    
-    // Saves the min and max light values
-    if (lightValue > maxLightValue) {
-      maxLightValue = lightValue;
-    }
-    
-    if (lightValue < minLightValue) {
-      minLightValue = lightValue;
-    }
-    
-    Serial.print("Light Value: ");
-    Serial.println(lightValue);
+   if(!calibrateTotalFeed) {
+      unsigned long currentTime = millis();
+      Serial.print("Current Time: ");
+      Serial.println(currentTime);
 
-    delay(100);
+      // Check if it's time to feed
+      if (currentTime - lastFeedTime >= feedInterval) {
+        Serial.println("Time to feed!");
+        attemptFeed();
+        lastFeedTime = currentTime;  // Reset the feeding timer
+      }
   }
-
-  if(!inCalibration) {
-    // Check for new card
-    if (rfid.PICC_IsNewCardPresent() && rfid.PICC_ReadCardSerial()) {
-      // Save the UID as a string
-        String uid = "";
-        for (byte i = 0; i < rfid.uid.size; i++) {
-            uid += String(rfid.uid.uidByte[i], HEX);
-        }
-        Serial.println("RFID UID: " + uid);
-
-        String url = String("/rfid_scan?pet_id=") + uid;
-        serverCode(url);
-    }
-    int brightness = map(lightValue, minLightValue, maxLightValue, 255, 0);
-    analogWrite(ledPin, brightness); // Set the LED brightness
-  }
-
+  delay(1000);
 }
 
 
-void blinkLED() {
-    // Toggle the LED state
-    int ledState = digitalRead(ledPin);
-    digitalWrite(ledPin, !ledState); 
-    delay(400);
-}
+void attemptFeed() {
+  bool updatedServer = false;
+  while (true) {
+    float currentWeight = scale.get_units();
+    Serial.print("Scale reading: ");
+    Serial.println(currentWeight, 1);
 
+    scale.power_down();
+    delay(500);
+    scale.power_up();
+
+    // allow for a small margin of error when determining
+    //   if there is enough food in the bowl
+    if (currentWeight + 5 < desiredFoodWeight) {
+      if(!updatedServer) {
+        serverCode();
+        updatedServer = true;
+      }
+      Serial.println("The servo will dispense food now!\n");
+      
+      // Open the servo to dispense food
+      myServo.write(SERVO_OPEN_POS);
+      delay(500);  // Adjust this delay based on dispensing mechanism
+
+      // Close the servo
+      myServo.write(SERVO_CLOSE_POS);
+    } else {
+      Serial.println("Desired food weight reached. Feeding complete.\n");
+      break;  // Exit the loop when the desired weight is reached
+    }
+  }
+}
 
 void nvs_access() {
   // Initialize NVS
@@ -178,22 +198,19 @@ void nvs_access() {
       Serial.printf("Error (%s) reading!\n", esp_err_to_name(err));
     }
   }
-
   // Close
   nvs_close(my_handle);
 }
 
 
 
-void serverCode(String url) {
+void serverCode() {
+  // Server -----------------------------------------
   int err = 0;
   WiFiClient c;
   HttpClient http(c);
 
-  // Convert String to const char* 
-  const char* urlCStr = url.c_str();
-
-  err = http.get("13.59.144.115", 5000, urlCStr, NULL);
+  err = http.get("13.59.144.115", 5000, "/feeding", NULL);
   if(err == 0) {
     // Serial.println("StartedRequest ok");
     err = http.responseStatusCode();
@@ -240,4 +257,7 @@ void serverCode(String url) {
     Serial.print("Conect failed: ");
     Serial.println(err);
   }
+  // -------------------------------------------------
 }
+
+
