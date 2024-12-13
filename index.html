@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pet Feeder Data</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+    <h1>Pet Feeder Data</h1>
+
+    <h2>Feeding Times</h2>
+    <canvas id="feedingChart" width="800" height="400"></canvas>
+
+    <h2>RFID Scans by Date</h2>
+    <canvas id="rfidChart" width="800" height="400"></canvas>
+
+    <script>
+        // Create feeding times graph
+        async function fetchFeedingData() {
+            try {
+                const response = await fetch("/feeding_data");
+                const data = await response.json();
+
+                const labels = [...new Set(data.map(event => event.date))];
+                const dataset = data.map(event => {
+                    const [hour, minute] = event.time.split(/[: ]/);
+                    const isPM = event.time.includes("PM");
+                    const timeInHours = (parseInt(hour) % 12) + (isPM ? 12 : 0) + parseInt(minute) / 60;
+
+                    return { x: event.date, y: timeInHours };
+                });
+
+                // Create the feeding times chart
+                const ctx = document.getElementById("feedingChart").getContext("2d");
+                new Chart(ctx, {
+                    type: "scatter",
+                    data: {
+                        labels: labels,
+                        datasets: [{
+                            label: "Feeding Times",
+                            data: dataset,
+                            pointBackgroundColor: "blue",
+                            pointRadius: 5
+                        }]
+                    },
+                    options: {
+                        scales: {
+                            x: {
+                                type: "category",
+                                title: {
+                                    display: true,
+                                    text: "Date"
+                                }
+                            },
+                            y: {
+                                title: {
+                                    display: true,
+                                    text: "Time of Day (Hours)"
+                                },
+                                ticks: {
+                                    callback: value => {
+                                        const hour = Math.floor(value);
+                                        const minute = Math.round((value - hour) * 60);
+                                        const ampm = hour >= 12 ? "PM" : "AM";
+                                        const displayHour = hour % 12 || 12;
+                                        return `${displayHour}:${minute.toString().padStart(2, "0")} ${ampm}`;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                });
+            } catch (error) {
+                console.error("Error fetching feeding data:", error);
+            }
+        }
+
+// Create RFID Graph
+async function fetchRFIDData() {
+        try {
+            const response = await fetch("/rfid_data");
+            const data = await response.json();
+            console.log("RFID data:", data);
+
+            // X-axis = date, Y-axis = count 
+            const groupedData = {};
+            data.forEach(scan => {
+                if (!groupedData[scan.date]) {
+                    groupedData[scan.date] = {};
+                }
+                if (!groupedData[scan.date][scan.pet_id]) {
+                    groupedData[scan.date][scan.pet_id] = 0;
+                }
+                groupedData[scan.date][scan.pet_id]++;
+            });
+
+            const labels = Object.keys(groupedData); 
+            const rfidIds = [...new Set(data.map(scan => scan.pet_id))];
+
+            // Create datasets for each RFID ID
+            const datasets = rfidIds.map(pet_id => {
+                const data = labels.map(date => groupedData[date]?.[pet_id] || 0); 
+                return {
+                    label: `RFID: ${pet_id}`,
+                    data: data,
+                    backgroundColor: getRandomColor(),
+                    borderWidth: 1
+                };
+            });
+
+            // Create the RFID scans chart
+            const ctx = document.getElementById("rfidChart").getContext("2d");
+            new Chart(ctx, {
+                type: "bar",
+                data: {
+                    labels: labels, // Dates as categories
+                    datasets: datasets // One dataset per RFID ID
+                },
+                options: {
+                    plugins: {
+                        tooltip: {
+                            callbacks: {
+                                label: function(tooltipItem) {
+                                    return `${tooltipItem.dataset.label}: ${tooltipItem.raw}`;
+                                }
+                            }
+                        }
+                    },
+                    responsive: true,
+                    scales: {
+                        x: {
+                            stacked: false,
+                            title: {
+                                display: true,
+                                text: "Date"
+                            },
+                            ticks: {
+                                maxRotation: 0,
+                                minRotation: 0
+                            }
+                        },
+                        y: {
+                            stacked: false,
+                            title: {
+                                display: true,
+                                text: "Number of Scans"
+                            },
+                            beginAtZero: true
+                        }
+                    }
+                }
+            });
+        } catch (error) {
+            console.error("Error fetching RFID data:", error);
+        }
+    }
+
+    // Generate random colors for chart aesthetic
+    function getRandomColor() {
+        const r = Math.floor(Math.random() * 256);
+        const g = Math.floor(Math.random() * 256);
+        const b = Math.floor(Math.random() * 256);
+        return `rgba(${r}, ${g}, ${b}, 0.7)`;
+    }
+        
+        fetchFeedingData();
+        fetchRFIDData();
+    </script>
+</body>
+</html>
